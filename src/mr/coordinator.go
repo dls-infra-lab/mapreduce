@@ -7,9 +7,40 @@ import "net/rpc"
 import "net/http"
 
 
+type TaskState int
+type CoordinatorState int
+
+const (
+	// task states
+	Idle TaskState = 0
+	InProgress TaskState = 1
+	Completed TaskState = 2
+
+	// coordinator states
+	Map CoordinatorState = 0
+	Reduce CoordinatorState = 1
+)
+
+type MapTask struct {
+	id int
+	filename string
+	state TaskState
+}
+
+type ReduceTask struct {
+	id int
+	state TaskState
+}
+
 type Coordinator struct {
 	// Your definitions here.
-
+	M []MapTask
+	R []ReduceTask
+	// needed so we know what phase
+	// we're in and the coordinator
+	// assigns certain tasks based on
+	// phase we're on
+	Phase CoordinatorState 
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -50,10 +81,34 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	// Your code here.
+	c := Coordinator{
+		M: []MapTask{},
+		R: []ReduceTask{},
+	}
+
+	mapTasks := []MapTask{}
+	reduceTasks := []ReduceTask{}
 
 	// Your code here.
+	for i, file := range files {
+		mapTasks = append(mapTasks, MapTask{
+			id: i,
+			filename: file,
+			state: Idle,
+		})
+	}
 
+	for j := 0; j < nReduce; j++ {
+		reduceTasks = append(reduceTasks, ReduceTask{
+			id: j,
+			state: Idle,
+		})
+	}
+
+	c.M = mapTasks
+	c.R = reduceTasks
+	c.Phase = Map
 
 	c.server(sockname)
 	return &c
