@@ -6,9 +6,8 @@ import "os"
 import "net/rpc"
 import "net/http"
 
-
 type TaskState int
-type CoordinatorState int
+type CoordinatorPhase int
 
 const (
 	// task states
@@ -17,8 +16,8 @@ const (
 	Completed TaskState = 2
 
 	// coordinator states
-	Map CoordinatorState = 0
-	Reduce CoordinatorState = 1
+	MapPhase CoordinatorPhase = 0
+	ReducePhase CoordinatorPhase = 1
 )
 
 type MapTask struct {
@@ -36,11 +35,12 @@ type Coordinator struct {
 	// Your definitions here.
 	M []MapTask
 	R []ReduceTask
+	nReduce int
 	// needed so we know what phase
 	// we're in and the coordinator
 	// assigns certain tasks based on
 	// phase we're on
-	Phase CoordinatorState 
+	Phase CoordinatorPhase 
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -53,6 +53,35 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+//the RPC argument that the worker calls to request a new task
+func (c *Coordinator) RequestTask(args *ReqArgs, reply *ReqReply) error {
+	var phase CoordinatorPhase = c.Phase
+	switch phase {
+		case MapPhase:
+			for _, task := range c.M {
+				if task.state == Idle {
+					// writing to reply
+					reply.taskType = MapT
+					reply.taskID = task.id
+					reply.filename = task.filename
+					reply.nReduce = c.nReduce
+					return nil
+				}
+			}
+		
+		case ReducePhase:
+			for _, task := range c.R {
+				if task.state == Idle {
+					reply.taskType = ReduceT
+					reply.taskID = task.id
+					// no filename since not needed
+					reply.nReduce = c.nReduce
+					return nil
+				}
+			}
+	}
+	return nil
+}
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server(sockname string) {
@@ -66,15 +95,54 @@ func (c *Coordinator) server(sockname string) {
 	go http.Serve(l, nil)
 }
 
+// updates a task's state to in-progress or completed
+func (c *Coordinator) UpdateTaskState(args *UpdateTaskStateArgs, reply *UpdateTaskStateReply) error {
+	// gets task and updates its state
+	taskID := args.taskID
+	taskType := args.taskType
+	updatedState := args.updatedState
+	if taskType == MapT {
+		c.M[taskID].state = updatedState
+		reply.updated = true
+	} else if taskType == ReduceT {
+		c.R[taskID].state = updatedState
+		reply.updated = true
+	} else {
+		reply.updated = false
+	}
+
+	// checking if all map tasks are complete now to switch from map -> 
+	// reduce phase
+	for _, mapTask := range c.M {
+		if mapTask.state != Completed {
+			return nil
+		}
+	}
+	
+	// update coordinator phase to reduce if all map tasks are completed
+	c.Phase = ReducePhase
+
+	return nil
+}
+
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	// Checks if all of the tasks are done
+	// both map and reduce tasks are considered one job
+	for _, mTask := range c.M {
+		if mTask.state != Completed {
+			return false
+		}
+	}
 
-	// Your code here.
+	for _, rTask := range c.R {
+		if rTask.state != Completed {
+			return false
+		}
+	}
 
-
-	return ret
+	return true
 }
 
 // create a Coordinator.
@@ -85,6 +153,8 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 	c := Coordinator{
 		M: []MapTask{},
 		R: []ReduceTask{},
+		nReduce: nReduce,
+		Phase: MapPhase,
 	}
 
 	mapTasks := []MapTask{}
@@ -108,7 +178,6 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 
 	c.M = mapTasks
 	c.R = reduceTasks
-	c.Phase = Map
 
 	c.server(sockname)
 	return &c
