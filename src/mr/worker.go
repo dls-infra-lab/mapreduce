@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 )
 
 // Map functions return a slice of KeyValue.
@@ -23,6 +24,15 @@ func ihash(key string) int {
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key - interface required to be defined for this 
+// method (as its usually used for sorting custom data structures)
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 var coordSockName string // socket for coordinator
 
@@ -46,6 +56,7 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 		taskType := reply.taskType
 		taskID := reply.taskID
 		nReduce := reply.nReduce
+		nMap := reply.nMap
 		
 		switch taskType{
 			case MapT:
@@ -72,17 +83,6 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 				file.Close()
 				kva := mapf(filename, string(content))
 
-				// using spread operator to add each of
-				// key value pairs to intermediate arr
-				// (that holds intermediate data)
-				// TODO: instead of having this list
-				// - we need to have it so that we drop
-				// each element of kva in a specific bucket
-				// - a bucket is represented by the files we'll
-				// make
-				// iterate through each kv pair
-				// otherwise
-
 				// storing file and encoder references
 				// so we can access and then in the files
 				// case close them when done at the end
@@ -108,26 +108,113 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 						log.Fatalf("cannot encode kv pair into file")
 					}
 				} 
-
-				// indicate that the mapping task is complete
-				completeTaskInfo := UpdateTaskStateArgs{
-					taskID: taskID,
-					taskType: MapT,
-					updatedState: Completed,
-				}
-				
-				CallUpdateTaskState(&completeTaskInfo, &UpdateTaskStateReply{})
 				
 				// closing all the files in the bucket
 				for _, file := range fileBucket {
 					file.Close()
 				}
 				
+				// updating mapping task state to complete
+				completeTaskInfo := UpdateTaskStateArgs{
+					taskID: taskID,
+					taskType: MapT,
+					updatedState: Completed,
+				}
+
+				CallUpdateTaskState(&completeTaskInfo, &UpdateTaskStateReply{})
 			
 			case ReduceT:
+				// gets task bucket and updates states
+				// updates task state to in-progress
+				inProgressTaskInfo := UpdateTaskStateArgs{
+					taskID: taskID,
+					taskType: ReduceT,
+					updatedState: InProgress,
+				}
+				CallUpdateTaskState(&inProgressTaskInfo, &UpdateTaskStateReply{})
 
-				return	
+				// from the task bucket we know which
+				// files we will process however
+				// reads the buffered data from local disk
+				intermediate := []KeyValue{}
+				for i := range nMap {
+					fileName := fmt.Sprintf("mr-%v-%v", i, taskID)
+
+					// open the intermediate file
+					file, err := os.Open(fileName)
+					if err != nil {
+						log.Fatalf("cannot open %v", reply.filename)	
+					}
+
+					dec := json.NewDecoder(file)
+					for {
+						var kv KeyValue
+						if err := dec.Decode(&kv); err != nil {
+							break
+						}
+						intermediate = append(intermediate, kv)
+					}
+
+					// close the intermediate file
+					file.Close()
+
+				}
+
+				// sorts it by the intermediate keys (all occcurrences
+				// of the same key are next to each other together)
+				sort.Sort(ByKey(intermediate))
 				
+				// output of reduce function appended to a final
+				// output file for this reduce partition
+				oname := fmt.Sprintf("mr-out-%v", taskID)
+				ofile, _ := os.Create(oname)
+
+				// reduce worker iterates over the sorted intermediate
+				// data and passes each unique key and set of inter
+				// mediate values to the user's reduce function 
+				i := 0
+				for i < len(intermediate) {
+					j := i + 1
+					// since the intermediate array is now sorted, what this is doing
+					// is that it is getting the slice of the kv pairs in the array
+					// that have the same key since in the reduce function we need to
+					// pass a key with all of its values
+					for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+						j++
+					}
+
+					// i = start of range in which key is same for all kv pairs
+					// j - 1 = end of range in which key is same for all kv pairs
+					values := []string{}
+					for k := i; k < j; k++ {
+						values = append(values, intermediate[k].Value)
+					}
+
+					// calling reduce function and should get back a string representing
+					// a kv pair
+					output := reducef(intermediate[i].Key, values)
+
+					// writing output to output file - output is a string with a value
+					// ex: in wc program, the output represents the total occurrences of the
+					// key that we passed in
+					fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+					// j represents the start of the next slice of kv pairs that share
+					// the same key
+					i = j
+				}
+
+				// close output file
+				ofile.Close()
+
+				// indicate that the mapping task is complete
+				completeTaskInfo := UpdateTaskStateArgs{
+					taskID: taskID,
+					taskType: ReduceT,
+					updatedState: Completed,
+				}
+				
+				CallUpdateTaskState(&completeTaskInfo, &UpdateTaskStateReply{})				
 		}
 	}
 }

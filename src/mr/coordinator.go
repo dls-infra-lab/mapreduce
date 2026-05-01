@@ -36,6 +36,7 @@ type Coordinator struct {
 	M []MapTask
 	R []ReduceTask
 	nReduce int
+	nMap int
 	// needed so we know what phase
 	// we're in and the coordinator
 	// assigns certain tasks based on
@@ -64,6 +65,7 @@ func (c *Coordinator) RequestTask(args *ReqArgs, reply *ReqReply) error {
 					reply.taskType = MapT
 					reply.taskID = task.id
 					reply.filename = task.filename
+					reply.nMap = c.nMap
 					reply.nReduce = c.nReduce
 					return nil
 				}
@@ -75,6 +77,8 @@ func (c *Coordinator) RequestTask(args *ReqArgs, reply *ReqReply) error {
 					reply.taskType = ReduceT
 					reply.taskID = task.id
 					// no filename since not needed
+					reply.filename = ""
+					reply.nMap = c.nMap
 					reply.nReduce = c.nReduce
 					return nil
 				}
@@ -178,6 +182,7 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 
 	c.M = mapTasks
 	c.R = reduceTasks
+	c.nMap = len(c.M)
 
 	c.server(sockname)
 	return &c

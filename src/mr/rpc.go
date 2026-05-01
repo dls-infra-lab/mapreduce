@@ -36,7 +36,8 @@ type ReqReply struct {
 	taskType TaskType
 	taskID int
 	filename string
-	nReduce int
+	nReduce int // number of reduce tasks
+	nMap int // number of map tasks
 }
 
 // Structs to use if updating a task's status was
