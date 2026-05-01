@@ -5,6 +5,7 @@ import "net"
 import "os"
 import "net/rpc"
 import "net/http"
+import "sync"
 
 type TaskState int
 type CoordinatorPhase int
@@ -41,21 +42,23 @@ type Coordinator struct {
 	// we're in and the coordinator
 	// assigns certain tasks based on
 	// phase we're on
-	Phase CoordinatorPhase 
+	Phase CoordinatorPhase
+
+	// lock we need so that only one worker at a time 
+	// can process a task
+	mutex sync.Mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
-	return nil
-}
-
-//the RPC argument that the worker calls to request a new task
+// the RPC argument that the worker calls to request a new task
+// implement locking here
 func (c *Coordinator) RequestTask(args *ReqArgs, reply *ReqReply) error {
+	// acquire lock
+	c.mutex.Lock()
+	
+	// unlock at the very end once a task request is finished
+	defer c.mutex.Unlock()
 	var phase CoordinatorPhase = c.Phase
 	switch phase {
 		case MapPhase:
@@ -102,17 +105,25 @@ func (c *Coordinator) server(sockname string) {
 // updates a task's state to in-progress or completed
 func (c *Coordinator) UpdateTaskState(args *UpdateTaskStateArgs, reply *UpdateTaskStateReply) error {
 	// gets task and updates its state
+	// acquire lock
+	c.mutex.Lock()
+
+	// unlock at the very end once a task update is finished
+	defer c.mutex.Unlock()
+
 	taskID := args.taskID
 	taskType := args.taskType
 	updatedState := args.updatedState
-	if taskType == MapT {
-		c.M[taskID].state = updatedState
-		reply.updated = true
-	} else if taskType == ReduceT {
-		c.R[taskID].state = updatedState
-		reply.updated = true
-	} else {
-		reply.updated = false
+	
+	switch taskType {
+		case MapT:
+			c.M[taskID].state = updatedState
+			reply.updated = true
+		case ReduceT:
+			c.R[taskID].state = updatedState
+			reply.updated = true
+		default:
+			reply.updated = false
 	}
 
 	// checking if all map tasks are complete now to switch from map -> 
@@ -132,8 +143,15 @@ func (c *Coordinator) UpdateTaskState(args *UpdateTaskStateArgs, reply *UpdateTa
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	// acquire lock
+	c.mutex.Lock()
+
+	// unlock at the very end once shared data is read
+	// to see if we have finished the whole job
+	defer c.mutex.Unlock()
+	
 	// Checks if all of the tasks are done
-	// both map and reduce tasks are considered one job
+	// both map and reduce tasks are considered one job	
 	for _, mTask := range c.M {
 		if mTask.state != Completed {
 			return false
